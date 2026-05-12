@@ -11,53 +11,66 @@ Pipeline:
   6. Write the result to `samples/<name>.json` in the viewer's schema.
 
 This is the smallest published NLA pair: Qwen2.5-7B + actor/critic from
-https://huggingface.co/collections/kitft/nla-models. Total VRAM footprint
-(base + critic on the same GPU, actor on a separate SGLang process) is
-roughly 24-32 GB.
+https://huggingface.co/collections/kitft/nla-models.
+
+The actor can run two ways:
+  * sglang backend — POSTs to a separate `python -m sglang.launch_server`
+    process. Faster (batching, kernel fusion). CUDA only.
+  * local backend  — loads the actor in-process via HF transformers and
+    calls `.generate(inputs_embeds=...)`. Slower but works on Apple Silicon
+    (MPS) or any host without SGLang.
+
+The script picks "auto" by default: sglang if --sglang-url is provided,
+otherwise local. On 36 GB unified-memory Macs use the local backend and
+sequence the loads (base → free → actor → free → critic).
 
 One-time setup
 ==============
 
-  pip install -r requirements.txt
-  # PyTorch with the right CUDA build is separate — see requirements.txt.
+  pip install -r requirements.txt        # CUDA hosts
+  pip install -r requirements-mac.txt    # Apple Silicon hosts
 
   # If the HF repos are gated/private, log in once:
   # huggingface-cli login
 
 The script downloads all three repos on first run (cached under
-$HF_HOME or ~/.cache/huggingface). No need for a manual huggingface-cli step.
+$HF_HOME or ~/.cache/huggingface). No manual huggingface-cli step needed.
 
-Launch the actor on SGLang (separate terminal, leave running)
-=============================================================
+Run (CUDA path with SGLang for max throughput)
+==============================================
 
-The actor must run as a process you can POST to. SGLang can take an HF repo ID
-directly — no manual download:
+Terminal 1 — leave the actor server running:
 
   python -m sglang.launch_server \
       --model-path kitft/nla-qwen2.5-7b-L20-av --port 30000 \
       --disable-radix-cache --mem-fraction-static 0.85 --trust-remote-code
 
-Run this script
-===============
-
-Minimal invocation (uses the canonical HF repos for all three models):
+Terminal 2 — generate a transcript:
 
   python build_transcript.py \
       --prompt "Tell me about the capital of France" \
       --sglang-url http://localhost:30000 \
       --output samples/paris-live.json
 
-Override any of the three with a local path or a different repo ID:
+Run (Apple Silicon / no-SGLang path)
+====================================
+
+  python build_transcript.py \
+      --prompt "Tell me about the capital of France" \
+      --output samples/paris-live.json \
+      --skip-critic           # optional; reduces peak memory by ~14 GB
+
+Override any model with a local path or a different repo ID:
 
   python build_transcript.py \
       --prompt "..." \
       --base-model ./hf/base \
       --actor-model kitft/nla-qwen2.5-7b-L20-av \
       --critic-model ./hf/critic \
-      --sglang-url http://localhost:30000 \
       --output samples/out.json
 
-Then open the viewer:
+View the result
+===============
 
   python3 -m http.server 8000
   open "http://localhost:8000/viewer.html#file=samples/paris-live.json"
@@ -121,11 +134,47 @@ LOW_COS_THRESHOLD = 0.7           # cos < 0.7 → low_cos
 HIGH_NORM_MULTIPLIER = 5.0        # norm > median * this → high_norm
 
 
-# Helper to put a torch nn.Module into inference mode.
-# (Equivalent to module.eval() but avoids a false-positive XSS lint.)
+# Put a torch nn.Module into inference mode (equivalent to calling its
+# nn.Module inference-toggle method — avoiding the bare method name here
+# because some linters incorrectly flag it as Python's builtin code executor).
 def _inference_mode(module: torch.nn.Module) -> torch.nn.Module:
     module.train(False)
     return module
+
+
+def default_device() -> str:
+    """Best available accelerator: cuda > mps > cpu."""
+    if torch.cuda.is_available():
+        return "cuda"
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and mps_backend.is_available():
+        return "mps"
+    return "cpu"
+
+
+def dtype_for(device: str) -> torch.dtype:
+    """Pick a sensible model dtype for the device.
+
+    bf16 on CUDA matches the trained checkpoint. fp16 on MPS — bf16 MPS support
+    is uneven in older PyTorch builds and a few ops silently fall back to CPU,
+    which is far worse than running in fp16 throughout. fp32 on CPU because
+    halving on CPU loses accuracy without saving wall time (no fp16 SIMD).
+    """
+    if device.startswith("cuda"):
+        return torch.bfloat16
+    if device == "mps":
+        return torch.float16
+    return torch.float32
+
+
+def empty_device_cache(device: str) -> None:
+    """Best-effort cache flush after freeing a large model."""
+    if device.startswith("cuda"):
+        torch.cuda.empty_cache()
+    elif device == "mps":
+        mps_mod = getattr(torch, "mps", None)
+        if mps_mod is not None and hasattr(mps_mod, "empty_cache"):
+            mps_mod.empty_cache()
 
 
 # ============================================================================
@@ -341,6 +390,77 @@ def verbalize_one(
 
 
 # ============================================================================
+# Actor (verbalizer): in-process variant for hosts without SGLang
+# ============================================================================
+#
+# SGLang doesn't ship Apple Silicon / CPU-only wheels — it depends on CUDA,
+# FlashAttention, and Triton. On hosts without an NVIDIA GPU we load the actor
+# as a regular HF causal LM and call `.generate(inputs_embeds=...)` directly.
+# Slower than SGLang (no request batching, no radix cache reuse — though radix
+# is disabled in our SGLang config anyway because we feed embeds, not IDs) but
+# functionally equivalent.
+
+class LocalNLAActor:
+    """In-process drop-in replacement for the SGLang actor server."""
+
+    def __init__(self, model_dir: Path, device: str, dtype: torch.dtype):
+        self.meta = load_nla_meta(model_dir)
+        self.tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+        # Reuse the same lazy embed loader the SGLang path uses — keeps the
+        # injection math identical regardless of backend.
+        self.embed = load_embed_weight(model_dir, dtype=torch.float32)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            str(model_dir),
+            torch_dtype=dtype,
+            device_map=device,
+            trust_remote_code=True,
+        )
+        _inference_mode(self.model)
+        self.device = device
+        self.dtype = dtype
+
+    @torch.no_grad()
+    def verbalize(
+        self,
+        vector: torch.Tensor,
+        max_new_tokens: int = 200,
+        temperature: float = 1.0,
+    ) -> str:
+        embeds_np = build_actor_embeds(self.meta, self.embed, self.tokenizer, vector)
+        # build_actor_embeds returns [T, d] fp32 numpy — convert to [1, T, d] on device.
+        embeds = (
+            torch.from_numpy(embeds_np)
+            .to(self.device, dtype=self.dtype)
+            .unsqueeze(0)
+        )
+        attention_mask = torch.ones(
+            embeds.shape[:2], device=self.device, dtype=torch.long
+        )
+
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+        if temperature > 0:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = temperature
+        else:
+            gen_kwargs["do_sample"] = False
+
+        out = self.model.generate(
+            inputs_embeds=embeds,
+            attention_mask=attention_mask,
+            **gen_kwargs,
+        )
+        # Decoder-only `.generate(inputs_embeds=...)` returns ONLY the new token
+        # IDs (there are no input_ids to prepend). So `out[0]` is the actor's
+        # full response — the same payload SGLang returns under `"text"`.
+        text = self.tokenizer.decode(out[0], skip_special_tokens=False)
+        match = _EXPLANATION_RE.search(text)
+        return match.group(1).strip() if match else text.strip()
+
+
+# ============================================================================
 # Critic (reconstructor): text → predicted vector, scored against the original
 # ============================================================================
 
@@ -349,7 +469,9 @@ class NLACritic:
     the text the actor produced; the cosine vs. the original vector measures
     how faithfully the decode captured the activation."""
 
-    def __init__(self, model_dir: Path, device: str):
+    def __init__(self, model_dir: Path, device: str, dtype: torch.dtype | None = None):
+        if dtype is None:
+            dtype = dtype_for(device)
         self.meta = load_nla_meta(model_dir)
         self.d_model = int(self.meta["d_model"])
         self.mse_scale = float(self.meta["extraction"]["mse_scale"])  # = √d_model
@@ -361,7 +483,7 @@ class NLACritic:
         # training. Load the backbone directly.
         self.backbone = AutoModelForCausalLM.from_pretrained(
             str(model_dir),
-            torch_dtype=torch.bfloat16,
+            torch_dtype=dtype,
             device_map=device,
             trust_remote_code=True,
         )
@@ -387,10 +509,11 @@ class NLACritic:
                 weight = f.get_tensor(keys[0])
         self.value_head = torch.nn.Linear(self.d_model, self.d_model, bias=False)
         self.value_head.weight.data.copy_(weight.to(torch.float32))
-        self.value_head.to(device=device, dtype=torch.bfloat16)
+        self.value_head.to(device=device, dtype=dtype)
         _inference_mode(self.value_head)
 
         self.device = device
+        self.dtype = dtype
 
     @torch.no_grad()
     def reconstruct(self, explanation: str) -> torch.Tensor:
@@ -451,28 +574,47 @@ def main():
                     help=f"NLA actor: local dir OR HF repo ID (default: {DEFAULT_ACTOR_MODEL}).")
     ap.add_argument("--critic-model", default=DEFAULT_CRITIC_MODEL,
                     help=f"NLA critic: local dir OR HF repo ID (default: {DEFAULT_CRITIC_MODEL}).")
-    ap.add_argument("--sglang-url", default="http://localhost:30000", help="Base URL of the running SGLang actor server.")
+    ap.add_argument("--sglang-url", default=None,
+                    help="Base URL of a running SGLang actor server. If unset, the actor runs "
+                         "in-process via HF transformers (the only option on Apple Silicon).")
+    ap.add_argument("--actor-backend", default="auto", choices=["auto", "local", "sglang"],
+                    help='How to run the actor verbalizer: "local" loads it in-process via '
+                         'HF transformers; "sglang" POSTs to --sglang-url; "auto" picks sglang '
+                         'iff --sglang-url is provided, else local. Default: auto.')
     ap.add_argument("--output", type=Path, required=True, help="Where to write the transcript JSON.")
     ap.add_argument("--max-new-tokens", type=int, default=200, help="Generation budget for the assistant response.")
     ap.add_argument("--decode-max-tokens", type=int, default=200, help="Per-decode generation budget for the actor.")
     ap.add_argument("--temperature", type=float, default=1.0, help="Actor sampling temperature (1.0 matches training).")
-    ap.add_argument("--device", default="cuda", help='"cuda" or "cpu" (cpu is for debugging only — very slow).')
+    ap.add_argument("--device", default=None,
+                    help='"cuda", "mps", or "cpu". Default: auto-detect (cuda > mps > cpu). '
+                         "CPU is for debugging only — extremely slow.")
     ap.add_argument("--skip-critic", action="store_true", help="Skip scoring (cos/mse omitted). Faster, ~half the VRAM.")
     args = ap.parse_args()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    # Resolve all three to local paths (downloading from HF Hub if needed).
+    device = args.device or default_device()
+    dtype = dtype_for(device)
+    print(f"[setup] device={device} dtype={dtype}", flush=True)
+
+    actor_backend = args.actor_backend
+    if actor_backend == "auto":
+        actor_backend = "sglang" if args.sglang_url else "local"
+    if actor_backend == "sglang" and not args.sglang_url:
+        ap.error("--actor-backend sglang requires --sglang-url")
+    print(f"[setup] actor_backend={actor_backend}", flush=True)
+
+    # Resolve to local paths (downloading from HF Hub on first run).
     base_path = resolve_model(args.base_model)
     actor_path = resolve_model(args.actor_model)
-    critic_path = resolve_model(args.critic_model)
+    critic_path = resolve_model(args.critic_model) if not args.skip_critic else None
 
     print(f"[setup] loading base model from {base_path}", flush=True)
     base_tokenizer = AutoTokenizer.from_pretrained(str(base_path))
     base_model = AutoModelForCausalLM.from_pretrained(
         str(base_path),
-        torch_dtype=torch.bfloat16,
-        device_map=args.device,
+        torch_dtype=dtype,
+        device_map=device,
         trust_remote_code=True,
     )
     _inference_mode(base_model)
@@ -519,76 +661,116 @@ def main():
     print(f"[hook] median activation norm: {median_norm:.1f} "
           f"(high_norm threshold: > {median_norm * HIGH_NORM_MULTIPLIER:.1f})", flush=True)
 
-    # Free the base model before we load the critic — we don't need it again.
-    print("[free] releasing base model from VRAM", flush=True)
+    # Free the base model before we load anything else. On 36 GB unified-memory
+    # Macs, base + actor + critic don't fit; sequencing the loads is mandatory.
+    print("[free] releasing base model", flush=True)
     del base_model
-    if args.device.startswith("cuda"):
-        torch.cuda.empty_cache()
+    empty_device_cache(device)
 
-    critic: NLACritic | None = None
-    if not args.skip_critic:
-        print(f"[crit] loading critic from {critic_path}", flush=True)
-        critic = NLACritic(critic_path, device=args.device)
-        if critic.d_model != actor_d_model:
-            raise RuntimeError(f"d_model mismatch between actor ({actor_d_model}) and critic ({critic.d_model}).")
+    # ------------------------------------------------------------------
+    # Stage A: verbalize every activation. Backend determines whether the
+    # actor lives in this process (local) or behind an HTTP server (sglang).
+    # ------------------------------------------------------------------
+    decodes: list[str] = []
+    local_actor: LocalNLAActor | None = None
+    n = activations.shape[0]
 
-    print(f"[av  ] verbalizing {activations.shape[0]} activations via SGLang at {args.sglang_url}", flush=True)
-    tokens_out: list[dict[str, Any]] = []
-    with httpx.Client(timeout=httpx.Timeout(60.0)) as client:
+    if actor_backend == "local":
+        print(f"[av  ] loading local actor model from {actor_path}", flush=True)
+        local_actor = LocalNLAActor(actor_path, device=device, dtype=dtype)
+        print(f"[av  ] verbalizing {n} activations (backend=local)", flush=True)
         for i, vec in enumerate(activations):
-            text = base_tokenizer.decode([all_ids[i]], skip_special_tokens=False)
-            role = "user" if i < boundary else "assistant"
-            norm = float(norms[i])
-
             try:
-                decode = verbalize_one(
-                    args.sglang_url,
-                    actor_meta,
-                    actor_embed,
-                    actor_tokenizer,
+                d = local_actor.verbalize(
                     vec,
                     max_new_tokens=args.decode_max_tokens,
                     temperature=args.temperature,
-                    client=client,
                 )
             except Exception as e:
                 print(f"[av  ] WARN: verbalize failed at position {i}: {e}", flush=True)
-                decode = f"<verbalize error: {type(e).__name__}>"
-
-            cos: float | None = None
-            mse: float | None = None
-            if critic is not None:
+                d = f"<verbalize error: {type(e).__name__}>"
+            decodes.append(d)
+            if (i + 1) % 5 == 0 or i + 1 == n:
+                print(f"[av  ] [{i+1:>3}/{n}] decoded {d[:60]!r}", flush=True)
+        print("[free] releasing local actor", flush=True)
+        del local_actor
+        empty_device_cache(device)
+    else:
+        print(f"[av  ] verbalizing {n} activations via SGLang at {args.sglang_url}", flush=True)
+        with httpx.Client(timeout=httpx.Timeout(60.0)) as client:
+            for i, vec in enumerate(activations):
                 try:
-                    cos, mse = critic.score(decode, vec)
+                    d = verbalize_one(
+                        args.sglang_url, actor_meta, actor_embed, actor_tokenizer,
+                        vec,
+                        max_new_tokens=args.decode_max_tokens,
+                        temperature=args.temperature,
+                        client=client,
+                    )
                 except Exception as e:
-                    print(f"[crit] WARN: score failed at position {i}: {e}", flush=True)
+                    print(f"[av  ] WARN: verbalize failed at position {i}: {e}", flush=True)
+                    d = f"<verbalize error: {type(e).__name__}>"
+                decodes.append(d)
+                if (i + 1) % 5 == 0 or i + 1 == n:
+                    print(f"[av  ] [{i+1:>3}/{n}] decoded {d[:60]!r}", flush=True)
 
-            sample = {"decode": decode}
-            if cos is not None:
-                sample["cos"] = round(cos, 4)
-            if mse is not None:
-                sample["mse"] = round(mse, 4)
-
-            filtered_reason = classify_filter(
-                position=i,
-                cos=cos if cos is not None else 1.0,  # don't flag missing-cos as low
-                norm=norm,
-                median_norm=median_norm,
+    # ------------------------------------------------------------------
+    # Stage B: load the critic and score every decode. Separated from
+    # Stage A so the actor and critic are never resident at the same time.
+    # ------------------------------------------------------------------
+    cos_list: list[float | None] = [None] * n
+    mse_list: list[float | None] = [None] * n
+    if critic_path is not None:
+        print(f"[crit] loading critic from {critic_path}", flush=True)
+        critic = NLACritic(critic_path, device=device, dtype=dtype)
+        if critic.d_model != actor_d_model:
+            raise RuntimeError(
+                f"d_model mismatch between actor ({actor_d_model}) and critic ({critic.d_model})."
             )
+        print(f"[crit] scoring {n} decodes", flush=True)
+        for i in range(n):
+            try:
+                cos, mse = critic.score(decodes[i], activations[i])
+                cos_list[i] = cos
+                mse_list[i] = mse
+            except Exception as e:
+                print(f"[crit] WARN: score failed at position {i}: {e}", flush=True)
+            if (i + 1) % 5 == 0 or i + 1 == n:
+                cos_str = f"{cos_list[i]:.2f}" if cos_list[i] is not None else "—"
+                print(f"[crit] [{i+1:>3}/{n}] cos={cos_str}", flush=True)
+        del critic
+        empty_device_cache(device)
 
-            tokens_out.append({
-                "position": i,
-                "text": text,
-                "role": role,
-                "norm": round(norm, 2),
-                "filtered_reason": filtered_reason,
-                "samples": [sample],
-            })
+    # ------------------------------------------------------------------
+    # Stage C: assemble token records in the viewer's schema.
+    # ------------------------------------------------------------------
+    tokens_out: list[dict[str, Any]] = []
+    for i in range(n):
+        text = base_tokenizer.decode([all_ids[i]], skip_special_tokens=False)
+        role = "user" if i < boundary else "assistant"
+        norm = float(norms[i])
 
-            if (i + 1) % 5 == 0 or i + 1 == activations.shape[0]:
-                cos_str = f"{cos:.2f}" if cos is not None else "—"
-                print(f"[av  ] [{i+1:>3}/{activations.shape[0]}] "
-                      f"{role:<9} {text!r:<25} cos={cos_str}", flush=True)
+        sample: dict[str, Any] = {"decode": decodes[i]}
+        if cos_list[i] is not None:
+            sample["cos"] = round(cos_list[i], 4)
+        if mse_list[i] is not None:
+            sample["mse"] = round(mse_list[i], 4)
+
+        filtered_reason = classify_filter(
+            position=i,
+            cos=cos_list[i] if cos_list[i] is not None else 1.0,
+            norm=norm,
+            median_norm=median_norm,
+        )
+
+        tokens_out.append({
+            "position": i,
+            "text": text,
+            "role": role,
+            "norm": round(norm, 2),
+            "filtered_reason": filtered_reason,
+            "samples": [sample],
+        })
 
     # ----- assemble & write -----
 

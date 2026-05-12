@@ -1,0 +1,36 @@
+# requirements-mac.txt — for build_transcript.py on Apple Silicon (M1/M2/M3/M4/M5)
+#
+# Install:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements-mac.txt
+#
+# Differences from requirements.txt:
+#   - No sglang. SGLang depends on CUDA / FlashAttention / Triton and has no
+#     Apple Silicon wheels. The script falls back to an in-process actor
+#     (LocalNLAActor) automatically when --sglang-url is not provided.
+#   - accelerate is listed explicitly. transformers needs it for `device_map=`
+#     and on CUDA hosts it's usually pulled in transitively by sglang[all];
+#     without sglang we have to ask for it directly.
+#   - torch is installed from the default index (no --index-url). PyPI's macOS
+#     wheels ship with MPS support out of the box.
+
+# PyTorch: 2.4+ recommended for solid MPS coverage. 2.2 is the floor.
+torch>=2.4
+
+# device_map="mps" needs a recent accelerate.
+accelerate>=0.30
+
+# HuggingFace stack — model + tokenizer + on-demand downloads from the Hub
+transformers>=4.45
+safetensors>=0.4
+huggingface_hub>=0.24
+
+# Used by the optional SGLang backend (still imported at module level).
+httpx>=0.27
+orjson>=3.10
+
+# YAML for nla_meta.yaml sidecars
+PyYAML>=6.0
+
+# Numerics
+numpy>=1.26
