@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>NLA Viewer</title>
+  <style>
+    /* === THEME === */
+    :root {
+      --bg-primary: #f5f5f7;
+      --bg-secondary: #ffffff;
+      --bg-tertiary: #e5e5e7;
+      --border: #d1d1d6;
+      --text-primary: #1d1d1f;
+      --text-secondary: #86868b;
+      --text-tertiary: #aeaeb2;
+      --accent: #0071e3;
+      --success: #34c759;
+      --warning: #ff9f0a;
+      --error: #ff3b30;
+      --selected-bg: #e8f4fd;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg-primary: #1d1d1f;
+        --bg-secondary: #2d2d2f;
+        --bg-tertiary: #3d3d3f;
+        --border: #424245;
+        --text-primary: #f5f5f7;
+        --text-secondary: #86868b;
+        --text-tertiary: #636366;
+        --accent: #0a84ff;
+        --selected-bg: rgba(10, 132, 255, 0.15);
+      }
+    }
+
+    /* === LAYOUT === */
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      display: flex;
+      flex-direction: column;
+      line-height: 1.5;
+    }
+    #app { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    #app-body { display: grid; grid-template-columns: 1fr 270px; flex: 1; min-height: 0; }
+
+    /* === EMPTY/ERROR STATES === */
+    #empty {
+      display: flex; align-items: center; justify-content: center;
+      grid-column: 1 / -1;
+      flex-direction: column; gap: 0.75rem;
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      padding: 2rem;
+      text-align: center;
+    }
+    #empty.error { color: var(--error); }
+    #empty .hint { color: var(--text-tertiary); font-size: 0.8rem; }
+    #empty code { background: var(--bg-tertiary); padding: 0.1rem 0.3rem; border-radius: 3px; }
+
+    /* === HEADER === */
+    .hdr {
+      background: var(--bg-secondary);
+      padding: 0.6rem 0.85rem;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 0.85rem;
+      font-size: 0.78rem;
+      flex-shrink: 0;
+    }
+    .hdr .ttl { font-weight: 600; font-family: ui-monospace, SFMono-Regular, monospace; }
+    .hdr .div { color: var(--text-tertiary); }
+    .hdr .prm {
+      color: var(--text-secondary);
+      flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0;
+    }
+    .hdr .pill {
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      white-space: nowrap;
+    }
+    .hdr .pill.good { background: rgba(52, 199, 89, 0.15); color: var(--success); }
+    .hdr .pill.warn { background: rgba(255, 159, 10, 0.15); color: var(--warning); }
+    .hdr .drop, .hdr .btn {
+      background: var(--bg-primary);
+      border: 1px dashed var(--border);
+      padding: 0.2rem 0.6rem;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .hdr .btn { border-style: solid; }
+    .hdr input[type="file"] { display: none; }
+    /* === TRANSCRIPT === */
+    #tx {
+      padding: 1rem 1.2rem;
+      line-height: 2.1;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.85rem;
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      min-height: 0;
+    }
+    #tx .turn { margin-bottom: 0.9rem; }
+    #tx .role-tag {
+      display: inline-block;
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-tertiary);
+      background: var(--bg-secondary);
+      padding: 0.1rem 0.4rem;
+      border-radius: 3px;
+      margin-right: 0.4rem;
+      vertical-align: middle;
+      user-select: none;
+    }
+    #tx .tk {
+      border-radius: 3px;
+      padding: 0 1px;
+      cursor: pointer;
+      transition: background 0.08s;
+    }
+    #tx .tk:hover { background: var(--bg-tertiary); }
+    #tx .tk.sel { background: var(--accent); color: white; padding: 1px 3px; }
+    #tx .tk.early { color: var(--text-tertiary); }
+    #tx .tk.lowcos, #tx .tk.highnorm { text-decoration: underline dotted var(--warning); text-underline-offset: 3px; }
+    #tx .tk.flagged::before { content: '⭐'; margin-right: 2px; font-size: 0.7em; }
+    /* === DECODE PANEL === */
+    #pn {
+      background: var(--bg-secondary);
+      padding: 0.85rem 0.95rem;
+      overflow-y: auto;
+      font-size: 0.8rem;
+      min-height: 0;
+    }
+    #pn .empty { color: var(--text-tertiary); font-style: italic; font-size: 0.85rem; }
+    #pn .tg {
+      color: var(--text-tertiary);
+      font-size: 0.6rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.25rem;
+      margin-top: 0.9rem;
+    }
+    #pn .tg:first-child { margin-top: 0; }
+    #pn .dx { font-size: 0.85rem; line-height: 1.5; color: var(--text-primary); }
+    #pn .dx + .dx { margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed var(--border); }
+    #pn .sample-hdr { font-size: 0.65rem; color: var(--text-tertiary); margin-bottom: 0.2rem; }
+    #pn .rw {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      margin-bottom: 0.2rem;
+      font-variant-numeric: tabular-nums;
+    }
+    #pn .rw strong { color: var(--text-primary); font-weight: 500; }
+    #pn .cos-good { color: var(--success); font-weight: 600; }
+    #pn .cos-warn { color: var(--warning); font-weight: 600; }
+    #pn .warn-box {
+      background: rgba(255, 159, 10, 0.1);
+      border-left: 2px solid var(--warning);
+      padding: 0.4rem 0.55rem;
+      font-size: 0.72rem;
+      color: var(--text-secondary);
+      margin-top: 0.6rem;
+      border-radius: 3px;
+    }
+    #pn .actions {
+      display: flex; gap: 0.35rem; margin-top: 0.8rem;
+      padding-top: 0.8rem; border-top: 1px solid var(--border);
+    }
+    #pn .actions button {
+      flex: 1;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.3rem 0.35rem;
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      font-family: inherit;
+      cursor: pointer;
+    }
+    #pn .actions button:hover { background: var(--accent); color: white; border-color: var(--accent); }
+    #pn .actions button.active { background: var(--accent); color: white; border-color: var(--accent); }
+    #pn textarea.note {
+      width: 100%;
+      min-height: 80px;
+      margin-top: 0.5rem;
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.4rem;
+      font-family: inherit;
+      font-size: 0.78rem;
+      color: var(--text-primary);
+      resize: vertical;
+    }
+    /* === FOOTER === */
+    .ft {
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+      padding: 0.4rem 0.85rem;
+      font-size: 0.7rem;
+      color: var(--text-tertiary);
+      display: flex; justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .ft kbd {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0 0.3rem;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.68rem;
+      color: var(--text-secondary);
+    }
+    /* === HELP MODAL === */
+    #help-modal {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.4);
+      display: none;
+      align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    #help-modal.open { display: flex; }
+    #help-modal .panel {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem 1.75rem;
+      max-width: 420px;
+      width: 90%;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.25);
+    }
+    #help-modal h2 { font-size: 1rem; margin-bottom: 1rem; }
+    #help-modal table { width: 100%; font-size: 0.85rem; }
+    #help-modal td { padding: 0.25rem 0; color: var(--text-secondary); }
+    #help-modal td:first-child { width: 100px; }
+    #help-modal kbd {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 0.05rem 0.35rem;
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-size: 0.78rem;
+      color: var(--text-primary);
+    }
+    #help-modal .close-hint { color: var(--text-tertiary); font-size: 0.75rem; margin-top: 1rem; text-align: center; }
+    /* === DROPZONE === */
+    #dropzone {
+      position: fixed; inset: 0;
+      background: rgba(10, 132, 255, 0.12);
+      border: 4px dashed var(--accent);
+      pointer-events: none;
+      display: none;
+      align-items: center; justify-content: center;
+      z-index: 50;
+      font-size: 1.5rem;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    #dropzone.active { display: flex; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="hdr">
+      <span class="ttl">nla-viewer</span>
+      <span class="div">·</span>
+      <span class="prm" id="hdr-prm">no transcript loaded</span>
+      <span class="pill good" id="hdr-cos" hidden></span>
+      <span class="pill warn" id="hdr-filt" hidden></span>
+      <label class="drop" id="hdr-drop">
+        ⬇ load JSON
+        <input type="file" id="hdr-file" accept="application/json,.json">
+      </label>
+      <button class="btn" id="hdr-export" hidden>export notes</button>
+      <button class="btn" id="hdr-import" hidden>import notes</button>
+    </div>
+    <div id="app-body">
+      <div id="empty">
+        <div>Drop a transcript JSON file here, or open with <code>#file=samples/paris.json</code></div>
+        <div class="hint">Loading via <code>file://</code> blocks fetch — use <code>python -m http.server</code> in this directory if needed.</div>
+      </div>
+      <div id="tx" hidden></div>
+      <div id="pn" hidden></div>
+    </div>
+    <div class="ft">
+      <span>
+        <kbd>←</kbd> <kbd>→</kbd> prev/next ·
+        <kbd>F</kbd> flag ·
+        <kbd>C</kbd> copy ·
+        <kbd>N</kbd> note ·
+        <kbd>?</kbd> help
+      </span>
+      <span id="ft-meta"></span>
+    </div>
+    <div id="help-modal">
+      <div class="panel">
+        <h2>Keyboard shortcuts</h2>
+        <table>
+          <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>previous / next token</td></tr>
+          <tr><td><kbd>F</kbd></td><td>flag current token</td></tr>
+          <tr><td><kbd>C</kbd></td><td>copy decode to clipboard</td></tr>
+          <tr><td><kbd>N</kbd></td><td>edit note for current token</td></tr>
+          <tr><td><kbd>?</kbd></td><td>show this help</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>close help / deselect</td></tr>
+        </table>
+        <div class="close-hint">Press <kbd>Esc</kbd> or click outside to close</div>
+      </div>
+    </div>
+  </div>
+  <div id="dropzone">⬇ drop transcript JSON</div>
+  <script>
+    'use strict';
+    // ===== DOM HELPER =====
+    // el(tag, props, ...children) — children are strings (become text nodes) or DOM nodes.
+    // props: class (string), dataset (object), hidden (bool), id (string), or DOM property names.
+    // Event handlers: pass an "on" key with an object like { click: fn }.
+    function el(tag, props, ...children) {
+      const node = document.createElement(tag);
+      if (props) {
+        for (const [k, v] of Object.entries(props)) {
+          if (v == null || v === false) continue;
+          if (k === 'class') node.className = v;
+          else if (k === 'dataset') Object.assign(node.dataset, v);
+          else if (k === 'on') for (const [ev, fn] of Object.entries(v)) node.addEventListener(ev, fn);
+          else if (k === 'hidden' && v === true) node.hidden = true;
+          else node[k] = v;
+        }
+      }
+      for (const c of children.flat()) {
+        if (c == null || c === false) continue;
+        node.appendChild(typeof c === 'string' || typeof c === 'number'
+          ? document.createTextNode(String(c))
+          : c);
+      }
+      return node;
+    }
+    // ===== STATE =====
+    const state = {
+      transcript: null,            // normalized { meta, tokens, meanCos, filteredCount, hash, filename, loadedAt }
+      selectedIndex: -1,           // index into state.transcript.tokens; -1 = nothing selected
+      help: false,                 // help modal open
+      noteOpen: false,             // note textarea expanded for selected token
+      annotations: { flags: {}, notes: {} },
+      listeners: [],
+    };
+    state.subscribe = (fn) => { state.listeners.push(fn); return () => { state.listeners = state.listeners.filter(l => l !== fn); }; };
+    state.notify = () => state.listeners.forEach(fn => fn(state));
+    state.set = (patch) => { Object.assign(state, patch); state.notify(); };
+    // ===== LOADER =====
+    async function sha256Hex(s) {
+      const buf = new TextEncoder().encode(s);
+      const hash = await crypto.subtle.digest('SHA-256', buf);
+      return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function validateTranscript(raw) {
+      if (!raw || typeof raw !== 'object') throw new Error('Transcript root must be an object');
+      if (!raw.meta || typeof raw.meta !== 'object') throw new Error('Missing required field: meta');
+      if (!raw.meta.model) throw new Error('Missing required field: meta.model');
+      if (!Array.isArray(raw.tokens)) throw new Error('Missing required field: tokens (must be array)');
+      raw.tokens.forEach((t, i) => {
+        if (typeof t.text !== 'string') throw new Error(`Token ${i} missing text`);
+        if (!Array.isArray(t.samples) || t.samples.length === 0) throw new Error(`Token ${i} missing samples`);
+      });
+    }
+
+    async function normalize(raw, filename) {
+      validateTranscript(raw);
+      const tokens = raw.tokens.map((t, i) => ({
+        position: typeof t.position === 'number' ? t.position : i,
+        text: t.text,
+        role: t.role === 'assistant' ? 'assistant' : 'user',
+        norm: typeof t.norm === 'number' ? t.norm : null,
+        filtered_reason: t.filtered_reason || null,
+        samples: t.samples,
+      }));
+      const cosValues = tokens.flatMap(t => t.samples.map(s => typeof s.cos === 'number' ? s.cos : null)).filter(c => c !== null);
+      const meanCos = cosValues.length ? cosValues.reduce((a, b) => a + b, 0) / cosValues.length : null;
+      const filteredCount = tokens.filter(t => t.filtered_reason).length;
+      const hash = raw.meta.transcript_hash || ('sha256:' + await sha256Hex(JSON.stringify(raw)));
+      return {
+        meta: raw.meta,
+        tokens,
+        meanCos,
+        filteredCount,
+        hash,
+        filename: filename || 'transcript.json',
+        loadedAt: new Date(),
+      };
+    }
+
+    async function loadFromUrl(url) {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      let raw;
+      try { raw = await resp.json(); }
+      catch (e) { throw new Error('Invalid JSON: ' + e.message); }
+      const filename = url.split('/').pop();
+      return normalize(raw, filename);
+    }
+
+    async function loadFromFile(file) {
+      const text = await file.text();
+      let raw;
+      try { raw = JSON.parse(text); }
+      catch (e) { throw new Error('Invalid JSON: ' + e.message); }
+      return normalize(raw, file.name);
+    }
+
+    function showError(message) {
+      const target = document.getElementById('empty');
+      target.classList.add('error');
+      target.replaceChildren(
+        el('div', null, message),
+        el('div', { class: 'hint' }, 'Drop a valid transcript JSON file to try again.'),
+      );
+      target.style.display = '';
+    }
+
+    function clearError() {
+      const target = document.getElementById('empty');
+      target.classList.remove('error');
+    }
+    // ===== ANNOTATIONS =====
+    const annotations = {
+      keyFor(hash) { return `nla-viewer:${hash}`; },
+
+      load(hash) {
+        try {
+          const raw = localStorage.getItem(this.keyFor(hash));
+          if (!raw) return { flags: {}, notes: {} };
+          const parsed = JSON.parse(raw);
+          return { flags: parsed.flags || {}, notes: parsed.notes || {} };
+        } catch { return { flags: {}, notes: {} }; }
+      },
+
+      save(hash, data) {
+        localStorage.setItem(this.keyFor(hash), JSON.stringify({
+          flags: data.flags || {},
+          notes: data.notes || {},
+        }));
+      },
+
+      toggleFlag(hash, position) {
+        const data = this.load(hash);
+        if (data.flags[position]) delete data.flags[position];
+        else data.flags[position] = true;
+        this.save(hash, data);
+        return data;
+      },
+
+      setNote(hash, position, text) {
+        const data = this.load(hash);
+        if (text && text.trim()) data.notes[position] = text;
+        else delete data.notes[position];
+        this.save(hash, data);
+        return data;
+      },
+
+      merge(hash, incoming) {
+        const existing = this.load(hash);
+        const merged = {
+          flags: { ...existing.flags, ...(incoming.flags || {}) },
+          notes: { ...existing.notes, ...(incoming.notes || {}) },
+        };
+        this.save(hash, merged);
+        return merged;
+      },
+    };
+    window.__nla = window.__nla || {};
+    window.__nla.annotations = annotations;
+
+    // Wrap state.set so transcript changes atomically include the loaded
+    // annotations. Without this, the renderers run before annotations are
+    // populated and flags wouldn't show on first load.
+    const originalSet = state.set;
+    state.set = (patch) => {
+      if (Object.prototype.hasOwnProperty.call(patch, 'transcript')) {
+        if (patch.transcript && patch.transcript.hash) {
+          patch.annotations = annotations.load(patch.transcript.hash);
+        } else if (patch.transcript === null) {
+          patch.annotations = { flags: {}, notes: {} };
+        }
+      }
+      originalSet.call(state, patch);
+    };
+    // ===== HEADER =====
+    function renderHeader() {
+      const t = state.transcript;
+      const prm = document.getElementById('hdr-prm');
+      const cos = document.getElementById('hdr-cos');
+      const filt = document.getElementById('hdr-filt');
+      const exp = document.getElementById('hdr-export');
+      const imp = document.getElementById('hdr-import');
+
+      if (!t) {
+        prm.textContent = 'no transcript loaded';
+        cos.hidden = true; filt.hidden = true;
+        exp.hidden = true; imp.hidden = true;
+        return;
+      }
+
+      const promptPreview = (t.meta.prompt || '').slice(0, 80);
+      prm.textContent = `${t.meta.model} · L${t.meta.layer} · ${t.tokens.length} tokens · "${promptPreview}"`;
+
+      if (t.meanCos !== null) {
+        cos.textContent = `μ cos ${t.meanCos.toFixed(2)}`;
+        cos.hidden = false;
+      } else { cos.hidden = true; }
+
+      if (t.filteredCount > 0) {
+        filt.textContent = `${t.filteredCount} filtered`;
+        filt.hidden = false;
+      } else { filt.hidden = true; }
+
+      exp.hidden = false;
+      imp.hidden = false;
+    }
+
+    document.getElementById('hdr-file').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      clearError();
+      try {
+        const transcript = await loadFromFile(file);
+        state.set({ transcript, selectedIndex: -1 });
+        document.getElementById('empty').style.display = 'none';
+      } catch (err) {
+        showError(`Failed to load ${file.name}: ${err.message}`);
+      }
+    });
+
+    state.subscribe(renderHeader);
+    renderHeader();
+    // ===== TRANSCRIPT =====
+    function filterClass(reason) {
+      if (reason === 'early_position') return 'early';
+      if (reason === 'low_cos') return 'lowcos';
+      if (reason === 'high_norm') return 'highnorm';
+      return '';
+    }
+
+    function tokenClasses(tok, idx) {
+      const cls = ['tk'];
+      if (idx === state.selectedIndex) cls.push('sel');
+      const fc = filterClass(tok.filtered_reason);
+      if (fc) cls.push(fc);
+      if (state.annotations.flags[idx]) cls.push('flagged');
+      return cls.join(' ');
+    }
+
+    function renderTranscript() {
+      const tx = document.getElementById('tx');
+      const empty = document.getElementById('empty');
+      const t = state.transcript;
+      if (!t) {
+        tx.hidden = true;
+        empty.style.display = '';
+        tx.replaceChildren();
+        return;
+      }
+      empty.style.display = 'none';
+      tx.hidden = false;
+
+      // Group consecutive tokens by role
+      const turns = [];
+      let cur = null;
+      t.tokens.forEach((tok, i) => {
+        if (!cur || cur.role !== tok.role) {
+          cur = { role: tok.role, tokens: [] };
+          turns.push(cur);
+        }
+        cur.tokens.push({ tok, idx: i });
+      });
+
+      const turnNodes = turns.map(turn => {
+        const tokenNodes = turn.tokens.map(({ tok, idx }, i) => [
+          i > 0 ? document.createTextNode(' ') : null,
+          el('span', {
+            class: tokenClasses(tok, idx),
+            dataset: { idx: String(idx) },
+          }, tok.text),
+        ]).flat();
+        return el('div', { class: 'turn' },
+          el('span', { class: 'role-tag' }, turn.role),
+          ...tokenNodes,
+        );
+      });
+
+      tx.replaceChildren(...turnNodes);
+    }
+
+    document.addEventListener('click', (e) => {
+      const tk = e.target.closest('#tx .tk');
+      if (!tk) return;
+      const idx = parseInt(tk.dataset.idx, 10);
+      state.set({ selectedIndex: idx, noteOpen: false });
+    });
+
+    state.subscribe(renderTranscript);
+    renderTranscript();
+    // ===== DECODE PANEL =====
+    const FILTER_MESSAGES = {
+      early_position: 'Position < 10 — residual stream has not accumulated much signal yet; decode reliability is lower than later positions.',
+      low_cos: 'Reconstruction cos < 0.7 — the critic could not faithfully recover this vector from the decode text. Treat the decode as a rough hint, not a claim.',
+      high_norm: 'High activation norm — these positions are rare in training and the decode is less reliable.',
+    };
+
+    function cosClass(c) { return c >= 0.7 ? 'cos-good' : 'cos-warn'; }
+    function fmtNum(n, d = 2) { return n == null ? '—' : n.toFixed(d); }
+
+    function renderDecode() {
+      const pn = document.getElementById('pn');
+      const t = state.transcript;
+      if (!t) { pn.hidden = true; pn.replaceChildren(); return; }
+      pn.hidden = false;
+
+      if (state.selectedIndex < 0 || state.selectedIndex >= t.tokens.length) {
+        pn.replaceChildren(el('div', { class: 'empty' }, 'Click a token to see its decode.'));
+        return;
+      }
+
+      const tok = t.tokens[state.selectedIndex];
+      const samples = tok.samples;
+      const firstCos = samples[0] && typeof samples[0].cos === 'number' ? samples[0].cos : null;
+      const firstMse = samples[0] && typeof samples[0].mse === 'number' ? samples[0].mse : null;
+
+      const decodeNodes = samples.length === 1
+        ? [el('div', { class: 'dx' }, samples[0].decode)]
+        : samples.map((s, i) => el('div', { class: 'dx' },
+            el('div', { class: 'sample-hdr' },
+              `sample ${i + 1} of ${samples.length}` + (typeof s.cos === 'number' ? ` · cos ${s.cos.toFixed(2)}` : '')
+            ),
+            s.decode,
+          ));
+
+      const cosSpan = firstCos === null
+        ? el('span', null, '—')
+        : el('span', { class: cosClass(firstCos) }, fmtNum(firstCos));
+
+      const rows = [
+        el('div', { class: 'rw' }, el('span', null, 'position'), el('strong', null, `${tok.position + 1} / ${t.tokens.length}`)),
+        el('div', { class: 'rw' }, el('span', null, 'cos'), cosSpan),
+        el('div', { class: 'rw' }, el('span', null, 'mse'), el('strong', null, fmtNum(firstMse))),
+        el('div', { class: 'rw' }, el('span', null, '‖v‖ residual'), el('strong', null, fmtNum(tok.norm, 1))),
+      ];
+
+      const warnBox = tok.filtered_reason
+        ? el('div', { class: 'warn-box' }, FILTER_MESSAGES[tok.filtered_reason] || `Filtered: ${tok.filtered_reason}`)
+        : null;
+
+      const flagBtn = el('button', {
+        id: 'act-flag',
+        class: state.annotations.flags[state.selectedIndex] ? 'active' : '',
+        on: { click: () => toggleFlagAt(state.selectedIndex) },
+      }, '⭐ flag');
+      const copyBtn = el('button', {
+        id: 'act-copy',
+        on: { click: () => copyDecodeAt(state.selectedIndex) },
+      }, '📋 copy');
+      const noteBtn = el('button', {
+        id: 'act-note',
+        class: (state.noteOpen || state.annotations.notes[state.selectedIndex]) ? 'active' : '',
+        on: { click: () => toggleNoteAt(state.selectedIndex) },
+      }, '📝 note');
+      const actions = el('div', { class: 'actions' }, flagBtn, copyBtn, noteBtn);
+
+      let noteArea = null;
+      if (state.noteOpen) {
+        const noteIdx = state.selectedIndex;  // capture so blur after navigation writes to the right token
+        noteArea = el('textarea', {
+          class: 'note',
+          id: 'act-note-text',
+          placeholder: 'Note for this token...',
+          value: state.annotations.notes[noteIdx] || '',
+          on: {
+            blur: (e) => setNoteAt(noteIdx, e.target.value),
+          },
+        });
+      }
+
+      pn.replaceChildren(...[
+        el('div', { class: 'tg' }, 'Decode'),
+        ...decodeNodes,
+        el('div', { class: 'tg' }, 'Stats'),
+        ...rows,
+        warnBox,
+        actions,
+        noteArea,
+      ].filter(Boolean));
+
+      if (noteArea) noteArea.focus();
+    }
+
+    function toggleFlagAt(idx) {
+      const t = state.transcript;
+      if (!t || idx < 0 || idx >= t.tokens.length) return;
+      state.annotations = annotations.toggleFlag(t.hash, idx);
+      state.notify();
+    }
+
+    function copyDecodeAt(idx) {
+      const t = state.transcript;
+      if (!t || idx < 0) return;
+      const text = t.tokens[idx].samples.map(s => s.decode).join('\n\n---\n\n');
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = document.getElementById('act-copy');
+        if (btn) {
+          const original = btn.textContent;
+          btn.textContent = '✓ copied';
+          setTimeout(() => { if (btn.textContent === '✓ copied') btn.textContent = original; }, 1200);
+        }
+      });
+    }
+
+    function toggleNoteAt(idx) {
+      if (state.selectedIndex !== idx) state.set({ selectedIndex: idx, noteOpen: true });
+      else state.set({ noteOpen: !state.noteOpen });
+    }
+
+    function setNoteAt(idx, text) {
+      const t = state.transcript;
+      if (!t || idx < 0) return;
+      state.annotations = annotations.setNote(t.hash, idx, text);
+      state.notify();
+    }
+
+    state.subscribe(renderDecode);
+    renderDecode();
+    // ===== KEYBOARD =====
+    document.addEventListener('keydown', (e) => {
+      if (e.target.matches('input, textarea')) return;
+      const t = state.transcript;
+      const helpEl = document.getElementById('help-modal');
+
+      if (e.key === 'Escape') {
+        if (state.help) { state.set({ help: false }); helpEl.classList.remove('open'); }
+        else state.set({ selectedIndex: -1, noteOpen: false });
+        return;
+      }
+
+      if (e.key === '?') {
+        const open = !state.help;
+        state.set({ help: open });
+        helpEl.classList.toggle('open', open);
+        return;
+      }
+
+      if (!t || t.tokens.length === 0) return;
+
+      if (e.key === 'f' || e.key === 'F') {
+        if (state.selectedIndex >= 0) { e.preventDefault(); toggleFlagAt(state.selectedIndex); }
+        return;
+      }
+      if (e.key === 'c' || e.key === 'C') {
+        if (state.selectedIndex >= 0) { e.preventDefault(); copyDecodeAt(state.selectedIndex); }
+        return;
+      }
+      if (e.key === 'n' || e.key === 'N') {
+        if (state.selectedIndex >= 0) { e.preventDefault(); toggleNoteAt(state.selectedIndex); }
+        return;
+      }
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const next = Math.max(0, state.selectedIndex < 0 ? 0 : state.selectedIndex - 1);
+        state.set({ selectedIndex: next, noteOpen: false });
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const next = Math.min(t.tokens.length - 1, state.selectedIndex < 0 ? 0 : state.selectedIndex + 1);
+        state.set({ selectedIndex: next, noteOpen: false });
+      }
+    });
+
+    document.getElementById('help-modal').addEventListener('click', (e) => {
+      if (e.target.id === 'help-modal') {
+        state.set({ help: false });
+        e.currentTarget.classList.remove('open');
+      }
+    });
+
+    function renderFooter() {
+      const t = state.transcript;
+      const m = document.getElementById('ft-meta');
+      if (!t) { m.textContent = ''; return; }
+      const time = t.loadedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      m.textContent = `${t.filename} · loaded ${time}`;
+    }
+    state.subscribe(renderFooter);
+    renderFooter();
+
+    // Scroll selected token into view when changed via keyboard
+    state.subscribe(() => {
+      if (state.selectedIndex < 0) return;
+      const elNode = document.querySelector(`#tx .tk[data-idx="${state.selectedIndex}"]`);
+      if (elNode) elNode.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+    // ===== DRAG-DROP =====
+    let dragDepth = 0;
+    const dz = document.getElementById('dropzone');
+
+    document.addEventListener('dragenter', (e) => {
+      e.preventDefault();
+      dragDepth++;
+      dz.classList.add('active');
+    });
+    document.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      dragDepth--;
+      if (dragDepth <= 0) { dragDepth = 0; dz.classList.remove('active'); }
+    });
+    document.addEventListener('dragover', (e) => { e.preventDefault(); });
+    document.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      dragDepth = 0;
+      dz.classList.remove('active');
+      const file = e.dataTransfer.files[0];
+      if (!file) return;
+
+      if (file.name.endsWith('.annotations.json')) {
+        await importAnnotations(file);
+        return;
+      }
+
+      clearError();
+      try {
+        const transcript = await loadFromFile(file);
+        state.set({ transcript, selectedIndex: -1, noteOpen: false });
+        document.getElementById('empty').style.display = 'none';
+      } catch (err) {
+        showError(`Failed to load ${file.name}: ${err.message}`);
+      }
+    });
+    // ===== EXPORT / IMPORT =====
+    function exportAnnotations() {
+      const t = state.transcript;
+      if (!t) return;
+      const data = annotations.load(t.hash);
+      const payload = {
+        transcript_hash: t.hash,
+        transcript_filename: t.filename,
+        exported_at: new Date().toISOString(),
+        flags: data.flags,
+        notes: data.notes,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = t.filename.replace(/\.json$/, '') + '.annotations.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function importAnnotations(file) {
+      const t = state.transcript;
+      if (!t) { showError('Load a transcript first, then import annotations.'); return; }
+      try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        if (data.transcript_hash && data.transcript_hash !== t.hash) {
+          const proceed = confirm('Annotation file is for a different transcript hash. Merge anyway?');
+          if (!proceed) return;
+        }
+        state.annotations = annotations.merge(t.hash, { flags: data.flags, notes: data.notes });
+        state.notify();
+      } catch (err) {
+        showError(`Failed to import annotations: ${err.message}`);
+      }
+    }
+
+    document.getElementById('hdr-export').addEventListener('click', exportAnnotations);
+    document.getElementById('hdr-import').addEventListener('click', () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+      input.onchange = () => { if (input.files[0]) importAnnotations(input.files[0]); };
+      input.click();
+    });
+    // ===== INIT =====
+    async function init() {
+      const hashParams = new URLSearchParams(location.hash.slice(1));
+      const fileParam = hashParams.get('file');
+      if (fileParam) {
+        clearError();
+        try {
+          const transcript = await loadFromUrl(fileParam);
+          state.set({ transcript, selectedIndex: -1 });
+        } catch (e) {
+          showError(`Failed to load ${fileParam}: ${e.message}`);
+        }
+      }
+    }
+    init();
+
+    // Expose for debugging (merge — annotations module may have already populated some keys)
+    window.__nla = Object.assign(window.__nla || {}, { state, loadFromUrl, loadFromFile, normalize, el });
+  </script>
+</body>
+</html>

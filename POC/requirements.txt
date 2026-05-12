@@ -1,0 +1,34 @@
+# scripts/requirements.txt — for build_transcript.py
+#
+# Install:
+#   pip install -r scripts/requirements.txt
+#
+# IMPORTANT: install PyTorch matching your CUDA version BEFORE this file, since
+# the right wheel depends on your driver. See https://pytorch.org/get-started/locally/
+# Examples:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121     # CUDA 12.1
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124     # CUDA 12.4
+#   pip install torch                                                          # CPU-only (debug only — extremely slow)
+
+# Constrain torch so a stale wheel can't sneak in below the version transformers needs.
+torch>=2.2
+
+# HuggingFace stack — model + tokenizer + on-demand downloads from the Hub
+transformers>=4.45
+safetensors>=0.4
+huggingface_hub>=0.24
+
+# SGLang client transport (HTTP + numpy-aware JSON serialization)
+httpx>=0.27
+orjson>=3.10
+
+# YAML for nla_meta.yaml sidecars
+PyYAML>=6.0
+
+# Numerics
+numpy>=1.26
+
+# SGLang server (used to run the NLA actor as a separate process).
+# Heavy install: pulls in CUDA, flash-attn, triton, etc. Drop this line if you
+# already have SGLang installed in this environment.
+sglang[all]>=0.5.6
