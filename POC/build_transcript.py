@@ -24,6 +24,13 @@ The script picks "auto" by default: sglang if --sglang-url is provided,
 otherwise local. On 36 GB unified-memory Macs use the local backend and
 sequence the loads (base → free → actor → free → critic).
 
+Notes before starting:
+Create a virtual environnment to handle all libraries that conda or whatever
+python environment you are using is handled properly at runtime. Currently 
+their is a mismatch of the libraries expected between torch, sklearn, and what 
+conda can provide that would yield a '88 byte mismatch' error. Handle these dependencies 
+before starting the application
+
 One-time setup
 ==============
 
@@ -621,7 +628,10 @@ def main():
 
     print(f"[setup] loading actor sidecar + embed table from {actor_path}", flush=True)
     actor_meta = load_nla_meta(actor_path)
-    actor_layer_index = int(actor_meta["extraction"]["layer_index"])
+    actor_layer_index = int(
+        actor_meta.get("extraction_layer_index")
+        or actor_meta.get("extraction", {}).get("layer_index")
+    )
     actor_d_model = int(actor_meta["d_model"])
     actor_embed = load_embed_weight(actor_path, dtype=torch.float32)
     actor_tokenizer = AutoTokenizer.from_pretrained(str(actor_path))
